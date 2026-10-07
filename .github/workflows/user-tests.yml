@@ -1,0 +1,16 @@
+name: User-mode build and shared-memory tests
+on: [push, pull_request]
+jobs:
+  user-tests:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build frontend and tests
+        shell: pwsh
+        run: |
+          $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName 'um\Windows.h') } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'Windows SDK missing on runner.' }
+          ./build.ps1 -UserOnly -SdkVersion $sdk.Name -MsBuildPath (Get-Command MSBuild.exe).Source
