@@ -1,68 +1,409 @@
 # Kernel Process Monitor
 
-A C++ Windows driver and desktop process monitor. The driver captures process creation and exit notifications and answers read-only process queries through a **shared memory section, two events and a system worker thread**. The user-mode window provides a filterable process table and kernel event history.
+A Windows kernel-mode process monitoring project written in C++.
 
-This edition retains the original project's communication architecture and `vA`/`um` structure. Its operation set has been adapted for process monitoring, with a new versioned protocol. It is a development PoC, with kernel runtime validation still pending; it is not a production driver.
+Kernel Process Monitor combines a Windows driver with a desktop frontend to observe process lifecycle activity and perform limited, read-only process queries. The driver captures process creation and termination notifications and communicates with the user-mode application through a shared memory section, synchronization events, and a system worker thread.
 
-## What the window shows
+The project is intended as a **systems programming and defensive-security development PoC**. It demonstrates Windows kernel callbacks, kernel/user-mode IPC, synchronization, fixed-size protocols, process-object handling, lifecycle management, and defensive error handling.
 
-| View | Data source |
-| --- | --- |
-| Process name, PID, parent PID and thread count | Windows Toolhelp snapshot, refreshed approximately once a second |
-| Process creation/exit, timestamp, sequence and creation image | Driver process notification callback |
-| Selected PID's creation time and exit status | Driver query using a referenced process object |
-| Connection state, total creates/exits and lost events | Shared-memory response |
+> **Status:** Development / proof of concept.  
+> Kernel runtime validation is still in progress. This is not intended for production deployment.
 
-The GUI runs in user mode. Its event capture and selected-process query run in kernel mode. Keeping ordinary enumeration in user mode avoids relying on undocumented kernel process-list layouts. Existing processes appear in the table immediately; kernel event capture begins when the driver loads, and the frontend initially follows events from its connection time.
+---
 
-The frontend borrows the process-table style of diagnostic tools. It does not scan or change process memory. The previous game-specific frontend, arbitrary memory operations and concealment/spoofing code are excluded from this monitor edition. See [the migration notes](docs/MIGRATION.md) for the exact boundary of the refactor.
+## Overview
 
-## Build
+The project consists of two main components:
 
-Install the Visual Studio C++ desktop workload and a compatible Windows SDK/WDK pair, including the WDK Visual Studio integration. The projects default to SDK `10.0.26100.0`, x64 and C++17. User projects select v143 for VS 2022 or v145 for VS 2026. Use [Microsoft's WDK compatibility table](https://learn.microsoft.com/en-us/windows-hardware/drivers/other-wdk-downloads) to choose your installation.
+- **Kernel driver (`vA`)**  
+  Registers for process notifications, records lifecycle events, services process queries, and manages the shared-memory communication channel.
 
-From a PowerShell prompt in this directory:
+- **User-mode monitor (`um`)**  
+  Displays the current Windows process list, consumes driver-generated events, allows filtering by executable name or PID, and requests additional information about selected processes.
+
+Ordinary process enumeration remains in user mode using documented Windows APIs. The kernel component is reserved for information that specifically benefits from kernel-side observation.
+
+This avoids depending on undocumented kernel process-list structures and keeps the driver's responsibilities deliberately narrow.
+
+---
+
+## Features
+
+### Process monitoring
+
+The driver records:
+
+- Process creation
+- Process termination
+- Process ID
+- Parent process ID
+- Creation image
+- Event timestamp
+- Monotonic event sequence number
+
+Existing processes are populated through a normal user-mode snapshot. Kernel event capture begins when the driver is loaded.
+
+### Process queries
+
+For a selected PID, the frontend can ask the driver for read-only information obtained through a referenced process object, including:
+
+- Process creation time
+- Process exit status
+
+The monitor does **not** read, write, scan, patch, or otherwise modify process memory.
+
+### Desktop frontend
+
+The GUI provides:
+
+- Live process table
+- Executable-name filtering
+- PID filtering
+- Kernel process-event history
+- Selected-process details
+- Driver connection state
+- Total process creation count
+- Total process exit count
+- Event-loss statistics
+
+The process table is refreshed approximately once per second.
+
+---
+
+## Architecture
+
+```text
++--------------------------------------+
+|          User-Mode Frontend          |
+|                                      |
+|  Toolhelp process enumeration        |
+|  Process table / event history       |
+|  Filtering and process selection     |
++------------------+-------------------+
+                   |
+                   | Shared section
+                   | Request/response slot
+                   | Synchronization events
+                   v
++------------------+-------------------+
+|             Kernel Driver            |
+|                                      |
+|  Process notification callback       |
+|  Fixed-size event ring               |
+|  System worker thread                |
+|  Read-only process queries           |
++--------------------------------------+
+```
+
+Communication intentionally retains the shared-memory design of the original codebase rather than replacing it with a conventional IOCTL interface.
+
+The channel consists of:
+
+- One shared memory section
+- Two synchronization events
+- One request/response slot
+- A fixed-size process-event ring
+- One kernel system worker thread
+
+Only one cooperative frontend is expected to own the request slot at a time.
+
+For a more detailed description, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
+## Protocol
+
+The kernel/user-mode interface uses a versioned, pointer-free protocol.
+
+Design properties include:
+
+- Fixed-width structures
+- No kernel pointers exposed to user mode
+- Protocol version validation
+- Request IDs
+- Driver epoch identifiers
+- Explicit `NTSTATUS` results
+- Bounded payload sizes
+- Interlocked request-state transitions
+- Explicit event-loss reporting
+
+The shared request slot uses atomic state transitions rather than polling continuously.
+
+Synchronization events notify either side when work becomes available.
+
+---
+
+## Event Ring
+
+Process lifecycle events are stored in a fixed **128-record ring buffer**.
+
+The ring uses:
+
+- Spin-lock protection
+- Monotonic sequence numbers
+- Per-client sequence cursors
+- Explicit overwrite accounting
+
+If the consumer falls behind far enough for records to be overwritten, that loss is exposed rather than silently ignored.
+
+Image information received by the process callback is copied while it is valid. The callback avoids waiting or performing allocation while holding the event-ring lock.
+
+---
+
+## Build Requirements
+
+The default configuration targets:
+
+- Windows x64
+- C++17
+- Windows SDK `10.0.26100.0`
+- Visual Studio 2022 or newer
+- MSVC `v143` / compatible newer toolset
+- Windows Driver Kit (WDK)
+
+Install the **Desktop development with C++** workload and a compatible Windows SDK/WDK combination.
+
+Microsoft publishes the current SDK/WDK compatibility information here:
+
+https://learn.microsoft.com/en-us/windows-hardware/drivers/other-wdk-downloads
+
+Warnings are enabled at level 4 and treated as errors.
+
+---
+
+## Building
+
+From PowerShell in the repository root:
 
 ```powershell
 ./build.ps1 -Configuration Release -SmokeTest
 ```
 
-This builds the driver, frontend and tests, then runs the ordinary user-mode protocol/ring and shared-memory tests. `-SmokeTest` also checks GUI startup and orderly shutdown in demo and normal modes. Binaries go into `build/x64/Release/`. The driver build is **unsigned**; building it does not install or load it.
+This builds:
 
-To build the frontend and tests without a WDK:
+- Kernel driver
+- Desktop frontend
+- User-mode tests
+
+It then runs the protocol, ring-buffer, shared-memory, and frontend smoke tests.
+
+Build output is placed in:
+
+```text
+build/x64/Release/
+```
+
+### User-mode-only build
+
+The frontend and tests can be built without installing the WDK:
 
 ```powershell
 ./build.ps1 -UserOnly -SdkVersion 10.0.26100.0 -SmokeTest
 ```
 
-Supply the version of your installed SDK if it differs. `-MsBuildPath` selects a particular Visual Studio installation; `-SdkVersion` overrides the default SDK for all projects. Alternatively, open `vA.sln` in Visual Studio with the matching WDK installed. Compiler warnings at level 4 are treated as errors.
+If your installed Windows SDK differs, provide its version with `-SdkVersion`.
 
-## Try the frontend
+A specific Visual Studio installation can also be selected using:
+
+```text
+-MsBuildPath
+```
+
+Alternatively, open:
+
+```text
+vA.sln
+```
+
+in Visual Studio with an appropriate WDK installed.
+
+---
+
+## Demo Mode
+
+The frontend can be exercised without loading the driver:
 
 ```powershell
 ./build/x64/Release/KpmMonitor.exe --demo
 ```
 
-Demo mode shows the real Windows process list alongside **clearly labelled synthetic events**. It requires no driver and proves only the frontend can run. Without `--demo`, a missing driver produces a visible connection error and retries; the Windows process table remains usable.
+Demo mode displays the real Windows process table alongside **clearly labelled synthetic kernel events**.
 
-For real kernel events, first follow [the test VM guide](docs/TESTING.md), then run the frontend elevated without `--demo`. Filter by executable name or PID and select a row to request its kernel details. Start and close a process to see its lifecycle events. Only one cooperative frontend can own the shared request slot at a time.
+This is useful for testing:
 
-## Engineering details
+- GUI startup
+- Process enumeration
+- Filtering
+- Event rendering
+- Selection behaviour
+- Clean application shutdown
 
-- A pointer-free protocol with fixed sizes, version checks, request IDs, driver epochs, explicit NTSTATUS results and bounded payloads.
-- One request slot with Interlocked state transitions; notification events replace busy polling.
-- A fixed 128-record event ring protected by a spin lock; sequence cursors and explicit overwrite counts keep loss visible.
-- Callback-owned image data is copied before raising IRQL; the callback does not allocate or wait under the lock.
-- Startup failures propagate to `DriverEntry` and trigger cleanup. Unload unregisters callbacks, joins the worker, unmaps its view and closes handles.
-- The section and events have explicit access for Administrators and SYSTEM. Named-object collisions fail startup rather than adopting an existing object.
-- The client closes an uncertain channel after a 1.5-second response timeout. The GUI performs requests on its background thread.
+Demo mode does **not** simulate or prove correct kernel execution.
 
-See [architecture and limitations](docs/ARCHITECTURE.md), [verification results](docs/VERIFICATION.md) and [the VM test checklist](docs/TESTING.md). Hosted CI builds only the user-mode projects and tests; it does not claim to execute the driver.
+---
 
-## Portfolio description
+## Running With the Driver
 
-An accurate description after reviewing and understanding the changes is:
+The driver build is unsigned.
 
-> Windows process-monitoring PoC in C++ with a kernel driver, shared-section IPC and an event-driven desktop client; added explicit request validation, bounded event buffering, deterministic resource cleanup and automated protocol/transport tests.
+Building the project does **not** automatically:
 
-Do not describe the driver as production-ready or verified under Driver Verifier until the VM checklist has been completed. Keep the original project history and acknowledge any borrowed components when publishing.
+- Install the driver
+- Register a service
+- Modify boot configuration
+- Load the driver
+
+Kernel testing should be performed in an isolated Windows test VM.
+
+See:
+
+[`docs/TESTING.md`](docs/TESTING.md)
+
+for the test environment and validation checklist.
+
+Once the driver has been loaded in the test environment, start the frontend elevated without `--demo`:
+
+```powershell
+./build/x64/Release/KpmMonitor.exe
+```
+
+You can then:
+
+1. Filter processes by executable name or PID.
+2. Select a process to request kernel-side information.
+3. Start another application.
+4. Observe its creation event.
+5. Close it.
+6. Observe its termination event.
+
+If the driver is unavailable, the frontend reports the connection failure and retries while keeping the ordinary Windows process table usable.
+
+---
+
+## Reliability and Cleanup
+
+Driver initialization is treated transactionally.
+
+If a required initialization stage fails, the failure propagates back to `DriverEntry` and resources acquired earlier in startup are released.
+
+During unload, the driver:
+
+- Stops accepting new work
+- Unregisters process callbacks
+- Signals the worker thread
+- Waits for the worker to terminate
+- Unmaps the shared section
+- Closes kernel handles
+- Releases remaining resources
+
+Named shared objects are created with explicit access for **Administrators** and **SYSTEM**.
+
+Unexpected named-object collisions cause initialization to fail instead of silently attaching to an existing object.
+
+On the user-mode side, a request that does not receive a response within approximately **1.5 seconds** causes the client to treat the communication channel as uncertain and close it rather than assuming that shared state remains valid.
+
+GUI requests are handled from a background thread so the window does not block on kernel communication.
+
+---
+
+## Verification
+
+The repository includes user-mode tests covering the parts of the protocol that can be exercised without loading kernel code.
+
+These include:
+
+- Protocol validation
+- Version handling
+- Ring-buffer behaviour
+- Sequence handling
+- Event overwrite accounting
+- Shared-memory state transitions
+- Frontend startup/shutdown smoke tests
+
+Hosted CI builds and tests the user-mode components.
+
+It does **not** claim to execute or validate the Windows kernel driver.
+
+See [`docs/VERIFICATION.md`](docs/VERIFICATION.md) for the current verification status.
+
+---
+
+## Scope and Non-Goals
+
+Kernel Process Monitor is intentionally limited in scope.
+
+It does not implement:
+
+- Arbitrary process memory reads
+- Arbitrary process memory writes
+- Code injection
+- Process manipulation
+- Process concealment
+- Handle hijacking
+- Kernel structure patching
+- Anti-cheat bypasses
+- Identity or hardware spoofing
+
+Its kernel interface is limited to process lifecycle monitoring and read-only process metadata queries.
+
+---
+
+## Project Background
+
+This project evolved from an earlier personal Windows kernel/user-mode experimentation codebase.
+
+The original project was built while learning driver development and was previously used as a foundation for game-security and game-cheat experimentation. For this version, I repurposed the architecture into a defensive process-monitoring project suitable for exploring Windows internals, endpoint visibility, and kernel/user-mode communication.
+
+The refactor deliberately preserves much of the original infrastructure, including the `vA` / `um` project structure and shared-memory communication model, while removing game-specific behaviour, arbitrary memory operations, and concealment/spoofing functionality.
+
+AI-assisted development was used during the process-monitoring refactor, particularly to help adapt and review portions of the codebase. The underlying project architecture and a substantial portion of the implementation originate from my earlier work.
+
+For a more precise description of what changed, see:
+
+[`docs/MIGRATION.md`](docs/MIGRATION.md)
+
+---
+
+## Why This Project Exists
+
+The aim of the project is to explore several areas of Windows systems engineering in one relatively small codebase:
+
+- Windows kernel driver development
+- Process notification callbacks
+- Kernel synchronization
+- Shared-memory IPC
+- Locking and IRQL constraints
+- Kernel object lifetime management
+- Defensive protocol design
+- Failure-path cleanup
+- User/kernel trust boundaries
+- Desktop diagnostic tooling
+- Testable separation between kernel and user-mode functionality
+
+It is primarily a learning and portfolio project rather than an attempt to replace established tools such as Process Explorer, Process Monitor, or production EDR telemetry.
+
+---
+
+## Repository Documentation
+
+Additional documentation is available in:
+
+```text
+docs/
+├── ARCHITECTURE.md   # Driver/frontend architecture and limitations
+├── MIGRATION.md      # Boundary between the original and monitor versions
+├── TESTING.md        # Test-VM setup and kernel validation checklist
+└── VERIFICATION.md   # Current verification and test results
+```
+
+---
+
+## Security Notice
+
+This project contains Windows kernel-mode code.
+
+A bug in a kernel driver can cause system instability, data loss, or a system crash. Do not test development drivers on a machine containing important data.
+
+Use an isolated virtual machine with appropriate debugging and recovery facilities.
+
+The driver is provided for educational, research, and portfolio purposes and is **not production-ready**.
