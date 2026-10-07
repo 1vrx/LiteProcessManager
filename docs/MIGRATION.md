@@ -1,6 +1,6 @@
 # Changes from the original archive
 
-This is a monitor edition of `kernel-proc-manager-master.zip`. The supplied archive remains untouched. The communication design is preserved, but these source files contain substantial implementation changes; it is not a binary-compatible patch to the original driver.
+This is a monitor edition of `kernel-proc-manager`. The communication design is preserved, but these source files contain substantial implementation changes; it is not a binary-compatible patch to the original driver.
 
 | Original element | Monitor edition |
 | --- | --- |
@@ -17,5 +17,3 @@ This is a monitor edition of `kernel-proc-manager-master.zip`. The supplied arch
 `vA/Entry.cpp` now owns initialization and unload. `vA/com/sharedmemory.cpp` owns IPC resources and worker execution. `vA/monitor` adds process callbacks and referenced-object queries. `shared` defines the contract and bounded event ring. `um/com` owns client resources, while `um/main.cpp` contains the monitor window. The original raw-memory, game and bypass files are not carried forward as dormant build options.
 
 Why some driver lines changed: explicit shutdown requires normal driver lifecycle ownership; bounded transport requires a new ABI; process events need a callback and buffer. Shared memory was retained rather than replacing communications with IOCTLs. The goal is a reviewable kernel-development PoC with the original transport idea, adapted to the agreed monitoring frontend.
-
-When applying this to an existing Git repository, use a dedicated commit or branch and preserve earlier history. Review the changes before publishing; the delivered implementation was prepared with coding-assistant help. No Git history was available inside the ZIP, so this edition cannot establish authorship of the original components or their upstream provenance. No new licence is invented here; resolve ownership and original licences before choosing a repository licence.
